@@ -1,0 +1,56 @@
+/* 红树林修复地块成活率跟踪台 · 全局样式
+   潮间带青绿底 + 苗木墨绿，浅色纸面卡片，强调数据可读性。 */
+
+:root {
+  --gb-bg: #f2f7f5;
+  --gb-surface: #ffffff;
+  --gb-ink: #20302b;
+  --gb-primary: #0f766e;
+  --gb-accent: #2f8f6d;
+  --gb-line: rgba(15, 118, 110, 0.14);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--gb-bg);
+  color: var(--gb-ink);
+  font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Source Han Sans SC', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  position: relative;
+}
+
+.gb-page-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.gb-mono {
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+}
+
+.ant-table-cell {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 900px) {
+  .ant-layout-content {
+    padding: 12px !important;
+  }
+}
