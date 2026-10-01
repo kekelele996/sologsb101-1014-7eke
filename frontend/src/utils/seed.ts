@@ -32,13 +32,32 @@ function plantingRow(row: Omit<Planting, 'createdAt' | 'updatedAt' | 'revision'>
   return { ...row, createdAt: SEED_TIME, updatedAt: SEED_TIME, revision: ROW_REVISION };
 }
 
-function surveyRow(row: Omit<Survey, 'createdAt' | 'updatedAt' | 'revision' | 'grade' | 'gradeManual' | 'survivalRate'>, total: number): Survey {
+function surveyRow(
+  row: Omit<
+    Survey,
+    | 'createdAt'
+    | 'updatedAt'
+    | 'revision'
+    | 'grade'
+    | 'gradeManual'
+    | 'survivalRate'
+    | 'confirmed'
+    | 'confirmedDate'
+    | 'conditionsValid'
+    | 'invalidReason'
+  >,
+  total: number,
+): Survey {
   const survivalRate = calcSurvivalRate(row.aliveCount, total);
   return {
     ...row,
     survivalRate,
     grade: rateLevel(survivalRate),
     gradeManual: false,
+    confirmed: false,
+    confirmedDate: '',
+    conditionsValid: true,
+    invalidReason: '',
     createdAt: SEED_TIME,
     updatedAt: SEED_TIME,
     revision: ROW_REVISION,
@@ -69,6 +88,9 @@ export async function seedDatabase(): Promise<void> {
       state: '跟踪中',
       missingCount: 1092,
       lastReplantDate: '',
+      crewReplantCount: 0,
+      crewSurvivalRate: 0,
+      crewRateDate: '',
     }),
     plotRow({
       id: SEED_IDS.plotB,
@@ -78,8 +100,12 @@ export async function seedDatabase(): Promise<void> {
       substrate: '砂泥质',
       restoreMode: '补植',
       state: '跟踪中',
+      // 班组已完成补植并现场测得成活率，等待项目部重新验收；缺株数已按实补 1188 扣减
       missingCount: 0,
       lastReplantDate: '2025-04-20',
+      crewReplantCount: 1188,
+      crewSurvivalRate: 100,
+      crewRateDate: '2025-04-20',
     }),
     plotRow({
       id: SEED_IDS.plotC,
@@ -88,9 +114,15 @@ export async function seedDatabase(): Promise<void> {
       tideZone: '高',
       substrate: '砂质',
       restoreMode: '造林',
+      // 项目部已重新验收定级：第 3 测次成活 7920/8000，缺株以项目部口径 80 为准；
+      // 班组累计实补 560 + 65 株，其中 65 株的对账挂起批次已在缺株数中扣减（145 → 80）
       state: '已验收',
-      missingCount: 560,
-      lastReplantDate: '2024-11-08',
+      missingCount: 80,
+      lastReplantDate: '2025-03-22',
+      crewReplantCount: 625,
+      // 班组现场按最新有效测次 + 实补测得 100%，与项目部第 3 测次 99% 口径各自留底
+      crewSurvivalRate: 100,
+      crewRateDate: '2025-03-22',
     }),
   ];
 
@@ -122,21 +154,121 @@ export async function seedDatabase(): Promise<void> {
   };
 
   // ---------------- 验收记录（每地块 2–3 个测次） ----------------
-  const surveys: Survey[] = [
-    surveyRow({ id: 'survey-a1', plotId: SEED_IDS.plotA, round: 1, date: '2024-06-20', aliveCount: 4680, avgHeightCm: 62 }, totalByPlot[SEED_IDS.plotA]),
-    surveyRow({ id: 'survey-a2', plotId: SEED_IDS.plotA, round: 2, date: '2024-09-18', aliveCount: 4420, avgHeightCm: 78 }, totalByPlot[SEED_IDS.plotA]),
-    surveyRow({ id: 'survey-a3', plotId: SEED_IDS.plotA, round: 3, date: '2025-03-15', aliveCount: 4108, avgHeightCm: 96 }, totalByPlot[SEED_IDS.plotA]),
-    surveyRow({ id: 'survey-b1', plotId: SEED_IDS.plotB, round: 1, date: '2024-07-05', aliveCount: 2772, avgHeightCm: 41 }, totalByPlot[SEED_IDS.plotB]),
-    surveyRow({ id: 'survey-b2', plotId: SEED_IDS.plotB, round: 2, date: '2024-10-12', aliveCount: 2112, avgHeightCm: 55 }, totalByPlot[SEED_IDS.plotB]),
-    surveyRow({ id: 'survey-c1', plotId: SEED_IDS.plotC, round: 1, date: '2024-05-28', aliveCount: 7680, avgHeightCm: 70 }, totalByPlot[SEED_IDS.plotC]),
-    surveyRow({ id: 'survey-c2', plotId: SEED_IDS.plotC, round: 2, date: '2024-08-30', aliveCount: 7440, avgHeightCm: 88 }, totalByPlot[SEED_IDS.plotC]),
+  // 注意：测次定级由项目部掌握——西湾第 1 测次已定版；北屿第 3 测次是补植后重新验收。
+  const rawSurveys: Array<
+    Omit<
+      Survey,
+      | 'createdAt'
+      | 'updatedAt'
+      | 'revision'
+      | 'grade'
+      | 'gradeManual'
+      | 'survivalRate'
+      | 'confirmed'
+      | 'confirmedDate'
+      | 'conditionsValid'
+      | 'invalidReason'
+    > & {
+      confirmed?: boolean;
+      confirmedDate?: string;
+      conditionsValid?: boolean;
+      invalidReason?: string;
+    }
+  > = [
+    { id: 'survey-a1', plotId: SEED_IDS.plotA, round: 1, date: '2024-06-20', aliveCount: 4680, avgHeightCm: 62 },
+    { id: 'survey-a2', plotId: SEED_IDS.plotA, round: 2, date: '2024-09-18', aliveCount: 4420, avgHeightCm: 78 },
+    { id: 'survey-a3', plotId: SEED_IDS.plotA, round: 3, date: '2025-03-15', aliveCount: 4108, avgHeightCm: 96 },
+    // 西湾第 1 测次已经项目部定级确认，班组补植不得再改写
+    {
+      id: 'survey-b1',
+      plotId: SEED_IDS.plotB,
+      round: 1,
+      date: '2024-07-05',
+      aliveCount: 2772,
+      avgHeightCm: 41,
+      confirmed: true,
+      confirmedDate: '2024-07-06',
+    },
+    // 第 2 测次尚未定级，班组补植后也不会被就地改写，须等项目部重新验收
+    { id: 'survey-b2', plotId: SEED_IDS.plotB, round: 2, date: '2024-10-12', aliveCount: 2112, avgHeightCm: 55 },
+    { id: 'survey-c1', plotId: SEED_IDS.plotC, round: 1, date: '2024-05-28', aliveCount: 7680, avgHeightCm: 70 },
+    { id: 'survey-c2', plotId: SEED_IDS.plotC, round: 2, date: '2024-08-30', aliveCount: 7440, avgHeightCm: 88 },
+    // 北屿补植后由项目部重新验收的新测次，当场定级定版（99%，优）
+    {
+      id: 'survey-c3',
+      plotId: SEED_IDS.plotC,
+      round: 3,
+      date: '2024-11-20',
+      aliveCount: 7920,
+      avgHeightCm: 95,
+      confirmed: true,
+      confirmedDate: '2024-11-20',
+    },
   ];
+  const surveys: Survey[] = rawSurveys.map(({ confirmed, confirmedDate, conditionsValid, invalidReason, ...rest }) => {
+    const row = surveyRow(rest, totalByPlot[rest.plotId]);
+    return {
+      ...row,
+      gradeManual: confirmed === true,
+      confirmed: confirmed === true,
+      confirmedDate: confirmedDate ?? '',
+      conditionsValid: conditionsValid ?? true,
+      invalidReason: invalidReason ?? '',
+    };
+  });
 
-  // ---------------- 补植计划（每地块 1 条，覆盖三种状态） ----------------
+  // ---------------- 补植计划（覆盖待补植 / 已补植待重新验收 / 已复核 / 对账挂起） ----------------
   const replants: Replant[] = [
-    replantRow({ id: 'replant-a1', plotId: SEED_IDS.plotA, missingCount: 1092, planDate: '2025-04-10', species: '秋茄', state: '待补植' }),
-    replantRow({ id: 'replant-b1', plotId: SEED_IDS.plotB, missingCount: 1188, planDate: '2025-04-18', species: '白骨壤', state: '已补植' }),
-    replantRow({ id: 'replant-c1', plotId: SEED_IDS.plotC, missingCount: 560, planDate: '2024-11-05', species: '无瓣海桑', state: '已复核' }),
+    replantRow({
+      id: 'replant-a1',
+      plotId: SEED_IDS.plotA,
+      missingCount: 1092,
+      planDate: '2025-04-10',
+      species: '秋茄',
+      state: '待补植',
+      crewActualCount: null,
+      completedDate: '',
+      reconcileStatus: 'pending',
+      reconcileNote: '',
+    }),
+    // 班组已补植并与项目部验收口径相符，等待项目部重新验收
+    replantRow({
+      id: 'replant-b1',
+      plotId: SEED_IDS.plotB,
+      missingCount: 1188,
+      planDate: '2025-04-18',
+      species: '白骨壤',
+      state: '已补植',
+      crewActualCount: 1188,
+      completedDate: '2025-04-20',
+      reconcileStatus: 'matched',
+      reconcileNote: '班组实植株数与项目部验收口径相符，等待项目部重新验收',
+    }),
+    replantRow({
+      id: 'replant-c1',
+      plotId: SEED_IDS.plotC,
+      missingCount: 80,
+      planDate: '2024-11-05',
+      species: '无瓣海桑',
+      state: '已复核',
+      crewActualCount: 560,
+      completedDate: '2024-11-08',
+      reconcileStatus: 'matched',
+      reconcileNote: '项目部已于 2024-11-20 重新验收（第 3 测次，成活率 99%）',
+    }),
+    // 班组现场实补与项目部验收缺株对不上，已挂起待人定
+    replantRow({
+      id: 'replant-c2',
+      plotId: SEED_IDS.plotC,
+      missingCount: 80,
+      planDate: '2025-03-20',
+      species: '无瓣海桑',
+      state: '待补植',
+      crewActualCount: 65,
+      completedDate: '2025-03-22',
+      reconcileStatus: 'held',
+      reconcileNote: '班组现场实补 65 株，与项目部验收缺株 80 株不符，挂起待人定',
+    }),
   ];
 
   await db.transaction('rw', db.plots, db.seedlings, db.plantings, db.surveys, db.replants, async () => {

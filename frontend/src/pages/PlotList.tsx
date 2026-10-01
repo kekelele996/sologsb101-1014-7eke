@@ -17,6 +17,7 @@ import {
   Space,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -25,9 +26,11 @@ import {
   EditOutlined,
   EnvironmentOutlined,
   ExperimentOutlined,
+  LockOutlined,
   PlusOutlined,
   RiseOutlined,
   FallOutlined,
+  StopOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import FilterBar from '../components/common/FilterBar';
@@ -210,16 +213,39 @@ export default function PlotList() {
     {
       title: '最新成活率',
       key: 'latestRate',
-      width: 190,
+      width: 250,
       render: (_value, record) => {
         const stat = statOf(record.id);
         return (
           <Space size={6} wrap>
-            <RateTag rate={stat.surveyCount > 0 ? stat.latestRate : null} level={stat.level} />
+            {stat.surveyCount > 0 ? (
+              <RateTag rate={stat.latestRate} level={stat.level} />
+            ) : (
+              <RateTag rate={null} />
+            )}
+            {stat.surveyCount > 0 && stat.latestConfirmed ? (
+              <Tooltip title="项目部已定级定版，班组补植不得改写该测次">
+                <LockOutlined style={{ color: '#722ed1' }} />
+              </Tooltip>
+            ) : null}
             {stat.surveyCount > 0 && stat.trend !== 0 ? (
               <Typography.Text type={stat.trend > 0 ? 'success' : 'danger'} style={{ fontSize: 12 }}>
                 {stat.trend > 0 ? <RiseOutlined /> : <FallOutlined />} {Math.abs(stat.trend)}
               </Typography.Text>
+            ) : null}
+            {record.crewRateDate ? (
+              <Tooltip title={`班组 ${record.crewRateDate} 现场测得，仅供班组侧参考；以项目部重新验收为准`}>
+                <Tag color="cyan" style={{ marginInlineEnd: 0 }}>
+                  班组 {record.crewSurvivalRate}%
+                </Tag>
+              </Tooltip>
+            ) : null}
+            {stat.invalidCount > 0 ? (
+              <Tooltip title="地块潮位带 / 底质已变更，原成活率结论失效，须重新验收">
+                <Tag color="red" icon={<StopOutlined />}>
+                  {stat.invalidCount} 个结论失效
+                </Tag>
+              </Tooltip>
             ) : null}
           </Space>
         );

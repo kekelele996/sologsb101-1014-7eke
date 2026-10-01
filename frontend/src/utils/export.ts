@@ -99,20 +99,29 @@ export function exportSummaryCsv(
     '最新成活株数',
     '最新成活率(%)',
     '判定等级',
+    '是否项目部定级',
+    '结论是否有效',
     '平均株高(cm)',
     '缺株数(株)',
+    '班组最新实补(株)',
+    '班组测得成活率(%)',
+    '班组测定日期',
     '补植计划数',
+    '对账挂起数',
     '最近补植日期',
   ];
   const lines: string[] = [header.map(csvCell).join(',')];
   plots.forEach((plot) => {
     const plotSeedlings = seedlings.filter((row) => row.plotId === plot.id);
     const plotPlantings = plantings.filter((row) => row.plotId === plot.id);
-    const plotSurveys = surveys.filter((row) => row.plotId === plot.id).sort((a, b) => a.round - b.round);
+    // 潮位带 / 底质变更后失效的结论不参与「最新」统计，须重新验收
+    const plotSurveys = surveys
+      .filter((row) => row.plotId === plot.id && row.conditionsValid !== false)
+      .sort((a, b) => a.round - b.round);
     const plotReplants = replants.filter((row) => row.plotId === plot.id);
     const total = plotPlantings.reduce((acc, row) => acc + row.count, 0);
     const latest = plotSurveys.length > 0 ? plotSurveys[plotSurveys.length - 1] : null;
-    const rate = latest ? calcSurvivalRate(latest.aliveCount, total) : 0;
+    const rate = latest ? (latest.confirmed ? latest.survivalRate : calcSurvivalRate(latest.aliveCount, total)) : 0;
     lines.push(
       [
         plot.name,
@@ -129,9 +138,15 @@ export function exportSummaryCsv(
         latest ? latest.aliveCount : 0,
         round1(rate),
         latest ? RATE_LEVEL_LABEL[latest.grade] : '—',
+        latest ? (latest.confirmed ? '是' : '否') : '—',
+        latest ? '有效' : '失效待重验',
         latest ? latest.avgHeightCm : 0,
         plot.missingCount,
+        plot.crewReplantCount ?? 0,
+        plot.crewSurvivalRate ?? 0,
+        plot.crewRateDate || '—',
         plotReplants.length,
+        plotReplants.filter((row) => row.reconcileStatus === 'held').length,
         plot.lastReplantDate || '—',
       ]
         .map(csvCell)
@@ -177,14 +192,18 @@ export function buildSummaryText(
   const lines: string[] = [`【红树林修复成活率通报】共 ${plots.length} 个地块`];
   plots.forEach((plot) => {
     const total = plantings.filter((row) => row.plotId === plot.id).reduce((acc, row) => acc + row.count, 0);
-    const plotSurveys = surveys.filter((row) => row.plotId === plot.id).sort((a, b) => a.round - b.round);
+    // 失效结论不参与「最新」统计；已定级测次以项目部确认值为准
+    const plotSurveys = surveys
+      .filter((row) => row.plotId === plot.id && row.conditionsValid !== false)
+      .sort((a, b) => a.round - b.round);
     const latest = plotSurveys.length > 0 ? plotSurveys[plotSurveys.length - 1] : null;
-    const rate = latest ? calcSurvivalRate(latest.aliveCount, total) : 0;
+    const rate = latest ? (latest.confirmed ? latest.survivalRate : calcSurvivalRate(latest.aliveCount, total)) : 0;
+    const held = replants.filter((row) => row.plotId === plot.id && row.reconcileStatus === 'held').length;
     const pending = replants.filter((row) => row.plotId === plot.id && row.state !== '已复核').length;
     lines.push(
       `· ${plot.name}（${plot.tideZone}潮位带 / ${plot.substrate}）栽植 ${total} 株，最新成活率 ${
-        latest ? percentText(rate) : '未验收'
-      }，缺株 ${plot.missingCount} 株，待办补植 ${pending} 条`,
+        latest ? `${percentText(rate)}${latest.confirmed ? '（项目部已定级）' : ''}` : '未验收'
+      }，缺株 ${plot.missingCount} 株，待办补植 ${pending} 条${held > 0 ? `，对账挂起 ${held} 条` : ''}`,
     );
   });
   return lines.join('\n');

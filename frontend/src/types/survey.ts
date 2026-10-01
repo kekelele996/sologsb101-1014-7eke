@@ -33,6 +33,17 @@ export interface Survey {
   grade: RateLevel;
   /** 该等级是否被人工调整过 */
   gradeManual: boolean;
+  /** 项目部是否已定级确认；定版后班组补植不得再改写本测次 */
+  confirmed: boolean;
+  /** 项目部定级确认日期 YYYY-MM-DD，未确认时为空串 */
+  confirmedDate: string;
+  /**
+   * 成活率结论是否仍有效。
+   * 地块潮位带 / 底质变更后引用该地块的结论失效，置为 false，须重新验收。
+   */
+  conditionsValid: boolean;
+  /** 结论失效原因（地块潮位带 / 底质变更） */
+  invalidReason: string;
   createdAt: string;
   updatedAt: string;
   revision: number;

@@ -49,6 +49,11 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* 对账挂起的补植计划整行浅红底，提示「待人定」 */
+.replant-row-held > .ant-table-cell {
+  background-color: #fff2f0 !important;
+}
+
 @media (max-width: 900px) {
   .ant-layout-content {
     padding: 12px !important;

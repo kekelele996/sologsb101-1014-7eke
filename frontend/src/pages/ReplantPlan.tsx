@@ -1,6 +1,9 @@
 /**
  * /replants 补植计划与结构版本
- * 补植计划增删改、状态流转（待补植 → 已补植 → 已复核）、草稿行内编辑、JSON 导入导出。
+ * 两侧分离：
+ * - 班组侧：现场登记补植完成（只更新地块缺株数 / 最近补植日期 / 班组实测成活率，不动已定级测次）；
+ * - 项目部侧：对账相符后重新验收，以新测次定级定版；
+ * - 班组实植株数与项目部验收口径对不上时挂起，由人裁决（认可平账 / 退回重报）。
  * 消费模型：Replant、Survey、全部模型；复用组件：<StatBadge>、<EmptyPanel>、<FilterBar>
  */
 import { useMemo, useState } from 'react';
@@ -18,6 +21,7 @@ import {
   Space,
   Table,
   Tag,
+  Tooltip,
   Typography,
   Upload,
 } from 'antd';
@@ -28,8 +32,9 @@ import {
   DownloadOutlined,
   EditOutlined,
   PlusOutlined,
-  SaveOutlined,
-  SyncOutlined,
+  RollbackOutlined,
+  SafetyCertificateOutlined,
+  StopOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
 import dayjs, { type Dayjs } from 'dayjs';
@@ -40,7 +45,14 @@ import { useIdbTable } from '../hooks/useIdbTable';
 import { usePlotStore } from '../stores/plotStore';
 import { useReplantStore } from '../stores/replantStore';
 import { DB_NAME, DB_SCHEMA_VERSION, db } from '../utils/db';
-import { REPLANT_STATE_OPTIONS, type Replant, type ReplantDraft, type ReplantState } from '../types/replant';
+import {
+  REPLANT_STATE_OPTIONS,
+  RECONCILE_STATUS_LABEL,
+  type Replant,
+  type ReplantDraft,
+  type ReplantState,
+  type ReconcileStatus,
+} from '../types/replant';
 import { SEEDLING_SPECIES_OPTIONS, type SeedlingSpecies } from '../types/seedling';
 import { exportSnapshotJson, exportSummaryCsvFile, parseSnapshot } from '../utils/export';
 import { percentText } from '../utils/rate';
@@ -52,6 +64,23 @@ interface ReplantFormValues {
   species: SeedlingSpecies;
   state: ReplantState;
 }
+
+interface CrewFormValues {
+  actualCount: number;
+  completedDate: Dayjs;
+}
+
+interface ReviewFormValues {
+  date: Dayjs;
+  aliveCount: number;
+  avgHeightCm: number;
+}
+
+const RECONCILE_COLOR: Record<ReconcileStatus, string> = {
+  pending: 'default',
+  matched: 'green',
+  held: 'red',
+};
 
 export default function ReplantPlan() {
   const { message, modal } = App.useApp();
@@ -65,17 +94,11 @@ export default function ReplantPlan() {
   const filters = useReplantStore((state) => state.filters);
   const setFilters = useReplantStore((state) => state.setFilters);
   const resetFilters = useReplantStore((state) => state.resetFilters);
-  const drafts = useReplantStore((state) => state.drafts);
-  const hasDraft = useReplantStore((state) => state.hasDraft);
-  const setDraft = useReplantStore((state) => state.setDraft);
-  const clearDraft = useReplantStore((state) => state.clearDraft);
-  const saveDraft = useReplantStore((state) => state.saveDraft);
   const createReplant = useReplantStore((state) => state.createReplant);
   const deleteReplant = useReplantStore((state) => state.deleteReplant);
-  const advance = useReplantStore((state) => state.advance);
-  const batchAdvance = useReplantStore((state) => state.batchAdvance);
-  const selectedIds = useReplantStore((state) => state.selectedIds);
-  const setSelectedIds = useReplantStore((state) => state.setSelectedIds);
+  const recordCrewCompletion = useReplantStore((state) => state.recordCrewCompletion);
+  const resolveHold = useReplantStore((state) => state.resolveHold);
+  const projectReview = useReplantStore((state) => state.projectReview);
   const exportAll = useReplantStore((state) => state.exportAll);
   const importAll = useReplantStore((state) => state.importAll);
   const resetAll = useReplantStore((state) => state.resetAll);
@@ -85,7 +108,13 @@ export default function ReplantPlan() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Replant | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [crewTarget, setCrewTarget] = useState<Replant | null>(null);
+  const [reviewTarget, setReviewTarget] = useState<Replant | null>(null);
+  const [crewSubmitting, setCrewSubmitting] = useState(false);
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
   const [form] = Form.useForm<ReplantFormValues>();
+  const [crewForm] = Form.useForm<CrewFormValues>();
+  const [reviewForm] = Form.useForm<ReviewFormValues>();
 
   const plotName = (plotId: string): string => plots.find((item) => item.id === plotId)?.name ?? '（地块已删除）';
 
@@ -95,6 +124,7 @@ export default function ReplantPlan() {
       .filter((row) => {
         if (filters.plotId !== 'all' && row.plotId !== filters.plotId) return false;
         if (filters.state !== 'all' && row.state !== filters.state) return false;
+        if (filters.reconcile !== 'all' && row.reconcileStatus !== filters.reconcile) return false;
         if (key === '') return true;
         return plotName(row.plotId).toLowerCase().includes(key) || row.species.toLowerCase().includes(key);
       })
@@ -103,11 +133,11 @@ export default function ReplantPlan() {
   }, [rows, filters, plots]);
 
   const stats = useMemo(() => {
-    const missing = rows.reduce((acc, row) => acc + row.missingCount, 0);
+    const held = rows.filter((row) => row.reconcileStatus === 'held');
     const reviewed = rows.filter((row) => row.state === '已复核').length;
     const pending = rows.filter((row) => row.state === '待补植').length;
     return {
-      missing,
+      heldCount: held.length,
       pending,
       reviewed,
       reviewPct: rows.length === 0 ? 0 : Math.round((reviewed / rows.length) * 1000) / 10,
@@ -140,6 +170,22 @@ export default function ReplantPlan() {
     setOpen(true);
   };
 
+  const openCrew = (row: Replant): void => {
+    setCrewTarget(row);
+    crewForm.setFieldsValue({ actualCount: row.missingCount, completedDate: dayjs() });
+  };
+
+  const openReview = (row: Replant): void => {
+    setReviewTarget(row);
+    const stat = statOf(row.plotId);
+    // 默认按「最新成活 + 班组实补」给出建议值，项目部可按现场实测修改
+    reviewForm.setFieldsValue({
+      date: dayjs(),
+      aliveCount: stat.plantTotal,
+      avgHeightCm: 0,
+    });
+  };
+
   const handleSubmit = async (): Promise<void> => {
     try {
       const values = await form.validateFields();
@@ -166,13 +212,68 @@ export default function ReplantPlan() {
     }
   };
 
-  const handleAdvance = async (row: Replant): Promise<void> => {
-    const next = await advance(row.id);
-    if (next === null) {
-      message.info('该计划已处于最终状态（已复核）');
-      return;
+  const handleCrewSubmit = async (): Promise<void> => {
+    if (crewTarget === null) return;
+    try {
+      const values = await crewForm.validateFields();
+      setCrewSubmitting(true);
+      const result = await recordCrewCompletion(crewTarget.id, {
+        actualCount: values.actualCount,
+        completedDate: values.completedDate.format('YYYY-MM-DD'),
+      });
+      if (result === null) return;
+      if (result.reconcile === 'held') {
+        message.warning(
+          `班组实补 ${result.actual} 株，与项目部验收缺株 ${result.expected} 株不符，已挂起待人定`,
+          6,
+        );
+      } else {
+        message.success(
+          `班组补植 ${result.actual} 株已登记，班组测得最新成活率 ${result.crewRate}%；项目部已定级测次未改动`,
+          6,
+        );
+      }
+      setCrewTarget(null);
+    } catch (error) {
+      if (error instanceof Error) message.error(error.message);
+    } finally {
+      setCrewSubmitting(false);
     }
-    message.success(`状态已推进为「${next}」`);
+  };
+
+  const handleResolve = (row: Replant, action: 'accept' | 'return'): void => {
+    modal.confirm({
+      title: action === 'accept' ? '认可班组实补株数并平账？' : '退回班组重新清点补报？',
+      content:
+        action === 'accept'
+          ? `将以班组实补 ${row.crewActualCount ?? 0} 株作为双方认可口径平账，随后可由项目部重新验收。`
+          : '将清空本次班组实补登记并恢复地块缺株数，班组需重新清点补报。',
+      okText: action === 'accept' ? '认可平账' : '退回重报',
+      cancelText: '取消',
+      onOk: async () => {
+        await resolveHold(row.id, action, '');
+        message.success(action === 'accept' ? '已按班组实补株数平账' : '已退回班组重报');
+      },
+    });
+  };
+
+  const handleReviewSubmit = async (): Promise<void> => {
+    if (reviewTarget === null) return;
+    try {
+      const values = await reviewForm.validateFields();
+      setReviewSubmitting(true);
+      const survey = await projectReview(reviewTarget.id, {
+        date: values.date.format('YYYY-MM-DD'),
+        aliveCount: values.aliveCount,
+        avgHeightCm: values.avgHeightCm,
+      });
+      message.success(`项目部已按第 ${survey.round} 测次重新验收，成活率 ${survey.survivalRate}%，等级已定版`);
+      setReviewTarget(null);
+    } catch (error) {
+      if (error instanceof Error) message.error(error.message);
+    } finally {
+      setReviewSubmitting(false);
+    }
   };
 
   const handleExport = async (): Promise<void> => {
@@ -217,135 +318,120 @@ export default function ReplantPlan() {
     {
       title: '地块',
       key: 'plot',
-      width: 200,
-      render: (_value, record) => (
-        <Space direction="vertical" size={0}>
-          <span>{plotName(record.plotId)}</span>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            最新成活率{' '}
-            {statOf(record.plotId).surveyCount > 0 ? percentText(statOf(record.plotId).latestRate) : '未验收'} ·
-            栽植 {statOf(record.plotId).plantTotal.toLocaleString('zh-CN')} 株
-          </Typography.Text>
-        </Space>
-      ),
-    },
-    {
-      title: '缺株数（株）',
-      key: 'missingCount',
-      width: 190,
+      width: 220,
       render: (_value, record) => {
-        const draft = drafts[record.id];
-        if (draft === undefined) return record.missingCount.toLocaleString('zh-CN');
+        const stat = statOf(record.plotId);
+        const plot = plots.find((item) => item.id === record.plotId);
         return (
-          <InputNumber
-            min={0}
-            max={200000}
-            step={10}
-            size="small"
-            style={{ width: 130 }}
-            value={draft.missingCount ?? record.missingCount}
-            onChange={(value) => setDraft(record.id, { missingCount: value ?? 0 })}
-          />
+          <Space direction="vertical" size={0}>
+            <span>{plotName(record.plotId)}</span>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              项目部最新{' '}
+              {stat.surveyCount > 0 ? percentText(stat.latestRate) : '未验收'}
+              {plot && plot.crewRateDate ? ` · 班组测得 ${percentText(plot.crewSurvivalRate)}` : ''} · 栽植{' '}
+              {stat.plantTotal.toLocaleString('zh-CN')} 株
+            </Typography.Text>
+          </Space>
         );
       },
+    },
+    {
+      title: '验收缺株（对账基准）',
+      dataIndex: 'missingCount',
+      key: 'missingCount',
+      width: 150,
+      align: 'right',
+      render: (value: number) => `${value.toLocaleString('zh-CN')} 株`,
+    },
+    {
+      title: '班组实补',
+      key: 'crewActualCount',
+      width: 130,
+      align: 'right',
+      render: (_value, record) =>
+        record.crewActualCount === null ? (
+          <Typography.Text type="secondary">未登记</Typography.Text>
+        ) : (
+          `${record.crewActualCount.toLocaleString('zh-CN')} 株`
+        ),
+    },
+    {
+      title: '完成日期',
+      key: 'completedDate',
+      width: 120,
+      render: (_value, record) => record.completedDate || '—',
     },
     {
       title: '计划日期',
+      dataIndex: 'planDate',
       key: 'planDate',
-      width: 180,
-      render: (_value, record) => {
-        const draft = drafts[record.id];
-        if (draft === undefined) return record.planDate;
-        return (
-          <DatePicker
-            size="small"
-            value={dayjs(draft.planDate ?? record.planDate)}
-            onChange={(value) => {
-              if (value !== null) setDraft(record.id, { planDate: value.format('YYYY-MM-DD') });
-            }}
-          />
-        );
-      },
+      width: 120,
     },
     {
       title: '补植树种',
       key: 'species',
-      width: 150,
-      render: (_value, record) => {
-        const draft = drafts[record.id];
-        if (draft === undefined) return <Tag color="green">{record.species}</Tag>;
-        return (
-          <Select
-            size="small"
-            style={{ width: 120 }}
-            value={draft.species ?? record.species}
-            onChange={(value: SeedlingSpecies) => setDraft(record.id, { species: value })}
-            options={SEEDLING_SPECIES_OPTIONS.map((value) => ({ value, label: value }))}
-          />
-        );
-      },
+      width: 120,
+      render: (_value, record) => <Tag color="green">{record.species}</Tag>,
     },
     {
       title: '状态',
       dataIndex: 'state',
       key: 'state',
-      width: 110,
+      width: 100,
       render: (value: ReplantState) => (
         <Tag color={value === '待补植' ? 'orange' : value === '已补植' ? 'blue' : 'green'}>{value}</Tag>
       ),
     },
     {
-      title: '草稿',
-      key: 'draft',
+      title: '对账',
+      key: 'reconcileStatus',
       width: 150,
-      render: (_value, record) =>
-        hasDraft(record.id) ? (
-          <Space size={4}>
-            <Button
-              size="small"
-              type="primary"
-              icon={<SaveOutlined />}
-              onClick={() => void saveDraft(record.id)}
-            >
-              保存
-            </Button>
-            <Button size="small" onClick={() => clearDraft(record.id)}>
-              放弃
-            </Button>
-          </Space>
-        ) : (
-          <Button
-            size="small"
-            onClick={() =>
-              setDraft(record.id, {
-                missingCount: record.missingCount,
-                planDate: record.planDate,
-                species: record.species,
-                state: record.state,
-              })
-            }
+      render: (_value, record) => (
+        <Tooltip title={record.reconcileNote}>
+          <Tag
+            color={RECONCILE_COLOR[record.reconcileStatus]}
+            icon={record.reconcileStatus === 'held' ? <StopOutlined /> : undefined}
           >
-            改草稿
-          </Button>
-        ),
+            {RECONCILE_STATUS_LABEL[record.reconcileStatus]}
+          </Tag>
+        </Tooltip>
+      ),
     },
     {
       title: '操作',
       key: 'action',
-      width: 250,
+      width: 320,
       fixed: 'right',
       render: (_value, record) => (
         <Space size={4} wrap>
+          {record.state === '待补植' && record.reconcileStatus !== 'held' ? (
+            <Button size="small" type="primary" ghost onClick={() => openCrew(record)}>
+              班组登记完成
+            </Button>
+          ) : null}
+          {record.reconcileStatus === 'held' ? (
+            <>
+              <Button size="small" type="link" icon={<SafetyCertificateOutlined />} onClick={() => handleResolve(record, 'accept')}>
+                认可平账
+              </Button>
+              <Button size="small" type="link" danger icon={<RollbackOutlined />} onClick={() => handleResolve(record, 'return')}>
+                退回重报
+              </Button>
+            </>
+          ) : null}
+          {record.state === '已补植' && record.reconcileStatus === 'matched' ? (
+            <Button size="small" type="primary" icon={<SafetyCertificateOutlined />} onClick={() => openReview(record)}>
+              项目部重新验收
+            </Button>
+          ) : null}
+          {record.state === '已复核' ? <Tag color="green">已重新验收定级</Tag> : null}
           <Button
             size="small"
             type="link"
-            icon={<SyncOutlined />}
+            icon={<EditOutlined />}
             disabled={record.state === '已复核'}
-            onClick={() => void handleAdvance(record)}
+            onClick={() => openEdit(record)}
           >
-            推进状态
-          </Button>
-          <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(record)}>
             编辑
           </Button>
           <Popconfirm
@@ -372,13 +458,19 @@ export default function ReplantPlan() {
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
         <StatBadge label="补植计划" value={rows.length} suffix="条" tone="primary" />
         <StatBadge label="待补植" value={stats.pending} suffix="条" tone={stats.pending > 0 ? 'warning' : 'default'} />
-        <StatBadge label="缺株合计" value={stats.missing.toLocaleString('zh-CN')} suffix="株" tone="danger" />
+        <StatBadge
+          label="对账挂起"
+          value={stats.heldCount}
+          suffix="条"
+          tone={stats.heldCount > 0 ? 'danger' : 'default'}
+          hint="班组实植株数与项目部验收缺株对不上，待人裁决"
+        />
         <StatBadge
           label="复核完成率"
           value={percentText(stats.reviewPct)}
           percent={stats.reviewPct}
           tone="success"
-          hint="状态为「已复核」的计划占比"
+          hint="状态为「已复核」（项目部重新验收）的计划占比"
         />
         <StatBadge
           label="数据结构版本"
@@ -391,6 +483,16 @@ export default function ReplantPlan() {
 
       {lastMessage !== '' ? (
         <Alert type="info" showIcon style={{ marginBottom: 14 }} message={lastMessage} />
+      ) : null}
+
+      {stats.heldCount > 0 ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message={`有 ${stats.heldCount} 条补植计划班组实株数与项目部验收对不上，已挂起待人定`}
+          description="挂起期间不得推进复核；可「认可班组实补株数平账」后交项目部重新验收，或「退回班组重新清点补报」。"
+        />
       ) : null}
 
       <Card
@@ -428,35 +530,27 @@ export default function ReplantPlan() {
           fields={[
             { key: 'plotId', label: '地块', options: plots.map((plot) => plot.id), optionLabels: Object.fromEntries(plots.map((plot) => [plot.id, plot.name])) },
             { key: 'state', label: '状态', options: [...REPLANT_STATE_OPTIONS] },
+            {
+              key: 'reconcile',
+              label: '对账',
+              options: ['pending', 'matched', 'held'],
+              optionLabels: { pending: '未对账', matched: '账实相符', held: '挂起待人定' },
+            },
           ]}
-          values={{ plotId: filters.plotId, state: filters.state }}
+          values={{ plotId: filters.plotId, state: filters.state, reconcile: filters.reconcile }}
           onChange={(key: string, value: string) => {
             if (key === 'plotId') setFilters({ plotId: value });
             if (key === 'state') setFilters({ state: value as ReplantState | 'all' });
+            if (key === 'reconcile') setFilters({ reconcile: value as ReconcileStatus | 'all' });
           }}
           onReset={resetFilters}
           resultText={`命中 ${filtered.length} / ${rows.length} 条`}
-          extra={
-            <>
-              <Tag color={selectedIds.length > 0 ? 'purple' : 'default'}>已选 {selectedIds.length} 条</Tag>
-              <Button
-                icon={<SyncOutlined />}
-                disabled={selectedIds.length === 0}
-                onClick={async () => {
-                  const count = await batchAdvance();
-                  message.success(`已批量推进 ${count} 条补植计划`);
-                }}
-              >
-                批量推进状态
-              </Button>
-            </>
-          }
         />
 
         {rows.length === 0 && !loading ? (
           <EmptyPanel
             title="还没有补植计划"
-            description="验收成活率偏低时可一键生成补植计划；也可以在这里手动新建，并按「待补植 → 已补植 → 已复核」推进。"
+            description="验收成活率偏低时可一键生成补植计划；班组现场登记补植完成后，与项目部验收对账相符方可重新验收，对不上先挂起待人定。"
             actionText="新建补植计划"
             onAction={openCreate}
           />
@@ -467,12 +561,9 @@ export default function ReplantPlan() {
             loading={loading || !ready}
             columns={columns}
             dataSource={filtered}
-            scroll={{ x: 1400 }}
-            rowSelection={{
-              selectedRowKeys: selectedIds,
-              onChange: (keys) => setSelectedIds(keys.map((key) => String(key))),
-            }}
+            scroll={{ x: 1500 }}
             pagination={{ pageSize: 8, showSizeChanger: false }}
+            rowClassName={(record) => (record.reconcileStatus === 'held' ? 'replant-row-held' : '')}
             locale={{
               emptyText: <EmptyPanel title="没有符合筛选条件的补植计划" actionText="重置筛选" onAction={resetFilters} />,
             }}
@@ -496,7 +587,7 @@ export default function ReplantPlan() {
           <Space size={12} style={{ display: 'flex' }}>
             <Form.Item
               name="missingCount"
-              label="缺株数（株）"
+              label="缺株数（株，项目部验收口径）"
               style={{ flex: 1 }}
               rules={[{ required: true, message: '请填写缺株数' }]}
             >
@@ -515,9 +606,92 @@ export default function ReplantPlan() {
             </Form.Item>
           </Space>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            状态推进到「已补植」时，会自动回写地块缺株数并重算最新一次验收的成活率。
+            班组补植完成只更新地块缺株数与班组实测成活率；项目部已定级的测次与等级不会被带着改，对账相符后由项目部重新验收才算数。
           </Typography.Text>
         </Form>
+      </Modal>
+
+      <Modal
+        title="班组现场登记补植完成"
+        open={crewTarget !== null}
+        onCancel={() => setCrewTarget(null)}
+        onOk={() => void handleCrewSubmit()}
+        confirmLoading={crewSubmitting}
+        okText="提交登记"
+        cancelText="取消"
+      >
+        {crewTarget ? (
+          <Form form={crewForm} layout="vertical">
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message={`${plotName(crewTarget.plotId)} · 项目部验收缺株 ${crewTarget.missingCount} 株（对账基准）`}
+              description="仅回写地块缺株数、最近补植日期与班组实测成活率；项目部已定级的测次与等级不会改动。"
+            />
+            <Space size={12} style={{ display: 'flex' }}>
+              <Form.Item
+                name="actualCount"
+                label="班组现场实补株数"
+                style={{ flex: 1 }}
+                rules={[{ required: true, message: '请填写现场实补株数' }]}
+              >
+                <InputNumber min={1} max={200000} step={10} style={{ width: '100%' }} />
+              </Form.Item>
+              <Form.Item name="completedDate" label="补植完成日期" style={{ flex: 1 }} rules={[{ required: true }]}>
+                <DatePicker style={{ width: '100%' }} />
+              </Form.Item>
+            </Space>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              实植株数与项目部验收缺株对不上时，本计划会自动挂起，暂停推进并通知负责人裁决。
+            </Typography.Text>
+          </Form>
+        ) : null}
+      </Modal>
+
+      <Modal
+        title="项目部重新验收"
+        open={reviewTarget !== null}
+        onCancel={() => setReviewTarget(null)}
+        onOk={() => void handleReviewSubmit()}
+        confirmLoading={reviewSubmitting}
+        okText="提交并定级定版"
+        cancelText="取消"
+      >
+        {reviewTarget ? (
+          <Form form={reviewForm} layout="vertical">
+            <Alert
+              type="success"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message={`${plotName(reviewTarget.plotId)} · 班组实补 ${reviewTarget.crewActualCount ?? 0} 株，账实相符`}
+              description="作为新测次登记成活株数并当场定级，原各测次原样保留、不受影响。"
+            />
+            <Space size={12} style={{ display: 'flex' }}>
+              <Form.Item name="date" label="验收日期" style={{ flex: 1 }} rules={[{ required: true }]}>
+                <DatePicker style={{ width: '100%' }} />
+              </Form.Item>
+              <Form.Item
+                name="avgHeightCm"
+                label="平均株高（cm）"
+                style={{ flex: 1 }}
+                rules={[{ required: true, message: '请填写平均株高' }]}
+              >
+                <InputNumber min={0} max={2000} step={1} style={{ width: '100%' }} />
+              </Form.Item>
+            </Space>
+            <Form.Item
+              name="aliveCount"
+              label="重新验收成活株数"
+              rules={[{ required: true, message: '请填写成活株数' }]}
+            >
+              <InputNumber min={0} max={500000} step={10} style={{ width: '100%' }} />
+            </Form.Item>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              成活率 = 成活株数 / 栽植总株数，保存时自动计算并定级定版；此后班组补植不得再改写本测次。
+            </Typography.Text>
+          </Form>
+        ) : null}
       </Modal>
     </div>
   );

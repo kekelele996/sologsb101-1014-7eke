@@ -8,7 +8,10 @@
     "dev": "vite --host --port 22814",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host --port 22814",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:rules": "esbuild scripts/verify-rules.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/verify-rules.mjs --log-level=warning && node node_modules/.cache/verify-rules.mjs",
+    "verify:migration": "esbuild scripts/verify-migration.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/verify-migration.mjs --log-level=warning && node node_modules/.cache/verify-migration.mjs",
+    "verify": "npm run verify:rules && npm run verify:migration"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.1",
@@ -25,6 +28,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "fake-indexeddb": "^6.2.5",
     "typescript": "^5.6.3",
     "vite": "^5.4.11"
   }

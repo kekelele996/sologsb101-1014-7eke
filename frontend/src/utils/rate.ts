@@ -146,6 +146,15 @@ export function suggestReplantCount(totalCount: number, aliveCount: number): num
   return Math.max(0, Math.round(totalCount - aliveCount));
 }
 
+/**
+ * 班组补植完成后的现场最新成活率（%）：
+ * 最新一次验收成活株数 + 本次班组实补株数，再除以栽植总株数。
+ * 仅供班组侧现场参考，不改写项目部任何已定级的测次。
+ */
+export function crewRateAfterReplant(aliveCount: number, crewCount: number, totalCount: number): number {
+  return calcSurvivalRate(aliveCount + Math.max(0, Math.round(crewCount)), totalCount);
+}
+
 /** 百分比文案 */
 export function percentText(value: number): string {
   return `${round1(value)}%`;

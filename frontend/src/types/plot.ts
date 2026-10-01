@@ -38,6 +38,12 @@ export interface Plot {
   missingCount: number;
   /** 最近一次补植/复壮回写日期 */
   lastReplantDate: string;
+  /** 最近一次班组补植实植株数（班组侧记录，未经过项目部复核） */
+  crewReplantCount: number;
+  /** 最近一次班组补植后现场测得的成活率（%），项目部重新验收前仅供班组参考 */
+  crewSurvivalRate: number;
+  /** 班组测得最新成活率的日期 YYYY-MM-DD */
+  crewRateDate: string;
   createdAt: string;
   updatedAt: string;
   /** 数据行结构修订号，便于后续按行迁移 */

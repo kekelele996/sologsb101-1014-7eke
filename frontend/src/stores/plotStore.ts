@@ -15,6 +15,7 @@ import {
   countAll,
   db,
   initDatabase,
+  patchPlot,
   putPlot,
   removePlot,
 } from '../utils/db';
@@ -39,8 +40,12 @@ export interface PlotStat {
   plantTotal: number;
   /** 验收测次数 */
   surveyCount: number;
-  /** 最新成活率（%） */
+  /** 因地块潮位带 / 底质变更而失效的结论数 */
+  invalidCount: number;
+  /** 最新成活率（%，项目部口径） */
   latestRate: number;
+  /** 最新结论是否已经项目部定级定版 */
+  latestConfirmed: boolean;
   /** 最新等级 */
   level: RateLevel;
   /** 成活率环比变化（百分点） */
@@ -101,7 +106,9 @@ const EMPTY_STAT: Omit<PlotStat, 'plotId'> = {
   seedlingQuantity: 0,
   plantTotal: 0,
   surveyCount: 0,
+  invalidCount: 0,
   latestRate: 0,
+  latestConfirmed: false,
   level: 'poor',
   trend: 0,
   suggestReplant: 0,
@@ -151,7 +158,9 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
                 seedlingQuantity: plotSeedlings.reduce((acc, row) => acc + row.quantity, 0),
                 plantTotal: summary.totalCount,
                 surveyCount: summary.points.length,
+                invalidCount: summary.invalidCount,
                 latestRate: summary.latestRate,
+                latestConfirmed: summary.latestConfirmed,
                 level: summary.level,
                 trend: summary.trend,
                 suggestReplant: summary.suggestReplant,
@@ -205,6 +214,9 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
       state: draft.state,
       missingCount: 0,
       lastReplantDate: '',
+      crewReplantCount: 0,
+      crewSurvivalRate: 0,
+      crewRateDate: '',
       createdAt: stamp,
       updatedAt: stamp,
       revision: ROW_REVISION,
@@ -217,8 +229,8 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
   async updatePlot(plotId, draft) {
     const existing = await db.plots.get(plotId);
     if (!existing) return;
-    await putPlot({
-      ...existing,
+    // 走 patchPlot：潮位带 / 底质一旦变更，引用本地块的成活率结论会被置为失效重算
+    await patchPlot(plotId, {
       name: draft.name.trim() || existing.name,
       areaMu: draft.areaMu,
       tideZone: draft.tideZone,

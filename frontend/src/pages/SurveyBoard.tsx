@@ -18,6 +18,7 @@ import {
   Space,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -29,6 +30,9 @@ import {
   RiseOutlined,
   FallOutlined,
   ToolOutlined,
+  LockOutlined,
+  SafetyCertificateOutlined,
+  StopOutlined,
 } from '@ant-design/icons';
 import dayjs, { type Dayjs } from 'dayjs';
 import EmptyPanel from '../components/common/EmptyPanel';
@@ -63,6 +67,7 @@ export default function SurveyBoard() {
   const gradeDraft = useSurveyStore((state) => state.gradeDraft);
   const setGradeDraft = useSurveyStore((state) => state.setGradeDraft);
   const bulkApplyGrade = useSurveyStore((state) => state.bulkApplyGrade);
+  const confirmRounds = useSurveyStore((state) => state.confirmRounds);
   const generateReplant = useSurveyStore((state) => state.generateReplant);
   const createSurvey = useSurveyStore((state) => state.createSurvey);
   const updateSurvey = useSurveyStore((state) => state.updateSurvey);
@@ -131,6 +136,15 @@ export default function SurveyBoard() {
   };
 
   const openEdit = (row: Survey): void => {
+    // 项目部已定级的测次与等级锁定，不能被带着改；失效结论只留痕
+    if (row.confirmed) {
+      message.warning(`第 ${row.round} 测次已经项目部定级定版，如需调整请重新验收录入新测次`);
+      return;
+    }
+    if (row.conditionsValid === false) {
+      message.warning('该地块潮位带 / 底质已变更，原结论已失效，请重新验收录入新测次');
+      return;
+    }
     setEditing(row);
     form.setFieldsValue({
       plotId: row.plotId,
@@ -177,7 +191,16 @@ export default function SurveyBoard() {
       message.info('请先在列表中勾选需要调整等级的验收记录');
       return;
     }
-    message.success(`已把 ${count} 条记录的成活率等级调整为「${RATE_LEVEL_LABEL[gradeDraft]}」`);
+    message.success(`已把 ${count} 条记录的成活率等级调整为「${RATE_LEVEL_LABEL[gradeDraft]}」并定级定版`);
+  };
+
+  const handleConfirmRounds = async (): Promise<void> => {
+    const count = await confirmRounds(selectedIds);
+    if (count === 0) {
+      message.info('请先勾选需要项目部定级确认的测次');
+      return;
+    }
+    message.success(`已定级确认 ${count} 个测次，班组补植不得再改写这些测次`);
   };
 
   const handleGenerateReplant = async (): Promise<void> => {
@@ -208,9 +231,18 @@ export default function SurveyBoard() {
       title: '测次',
       dataIndex: 'round',
       key: 'round',
-      width: 84,
+      width: 104,
       align: 'center',
-      render: (value: number) => <Tag color="blue">第 {value} 次</Tag>,
+      render: (value: number, record) => (
+        <Space size={4}>
+          <Tag color="blue">第 {value} 次</Tag>
+          {record.confirmed ? (
+            <Tooltip title={`项目部已于 ${record.confirmedDate || '当日'} 定级定版`}>
+              <LockOutlined style={{ color: '#722ed1' }} />
+            </Tooltip>
+          ) : null}
+        </Space>
+      ),
       sorter: (a, b) => a.round - b.round,
     },
     { title: '验收日期', dataIndex: 'date', key: 'date', width: 128, sorter: (a, b) => a.date.localeCompare(b.date) },
@@ -225,16 +257,25 @@ export default function SurveyBoard() {
     {
       title: '成活率',
       key: 'rate',
-      width: 180,
+      width: 210,
       render: (_value, record) => {
         const summary = summaryOf(record.plotId);
         const point = summary.points.find((item) => item.surveyId === record.id);
         return (
-          <RateTag
-            rate={point?.rate ?? record.survivalRate}
-            level={point?.level ?? record.grade}
-            manual={record.gradeManual}
-          />
+          <Space size={4} wrap>
+            <RateTag
+              rate={point?.rate ?? record.survivalRate}
+              level={point?.level ?? record.grade}
+              manual={record.gradeManual}
+            />
+            {record.conditionsValid === false ? (
+              <Tooltip title={record.invalidReason || '地块潮位带 / 底质已变更'}>
+                <Tag color="red" icon={<StopOutlined />}>
+                  失效待重验
+                </Tag>
+              </Tooltip>
+            ) : null}
+          </Space>
         );
       },
     },
@@ -265,11 +306,19 @@ export default function SurveyBoard() {
       },
     },
     {
-      title: '等级来源',
+      title: '定级状态',
       key: 'gradeSource',
-      width: 110,
+      width: 150,
       render: (_value, record) =>
-        record.gradeManual ? <Tag color="purple">人工复核</Tag> : <Tag>自动判定</Tag>,
+        record.confirmed ? (
+          <Tooltip title={`定级日期 ${record.confirmedDate || '—'}；班组补植不得改写本测次`}>
+            <Tag color="purple" icon={<SafetyCertificateOutlined />}>
+              项目部已定级
+            </Tag>
+          </Tooltip>
+        ) : (
+          <Tag>未定级·自动判定</Tag>
+        ),
     },
     {
       title: '操作',
@@ -277,7 +326,13 @@ export default function SurveyBoard() {
       width: 150,
       render: (_value, record) => (
         <Space size={4}>
-          <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(record)}>
+          <Button
+            size="small"
+            type="link"
+            icon={<EditOutlined />}
+            disabled={record.confirmed || record.conditionsValid === false}
+            onClick={() => openEdit(record)}
+          >
             编辑
           </Button>
           <Popconfirm
@@ -415,7 +470,10 @@ export default function SurveyBoard() {
             />
           </Space>
           <Button type="primary" ghost disabled={selectedIds.length === 0} onClick={() => void handleBulkGrade()}>
-            批量调整成活率等级
+            调整等级并定级
+          </Button>
+          <Button disabled={selectedIds.length === 0} icon={<SafetyCertificateOutlined />} onClick={() => void handleConfirmRounds()}>
+            项目部定级确认
           </Button>
           <Button disabled={selectedIds.length === 0} onClick={() => setSelectedIds([])}>
             取消选择
@@ -491,7 +549,9 @@ export default function SurveyBoard() {
             </Form.Item>
           </Space>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            成活率 = 成活株数 / 该地块栽植总株数，保存时自动计算；成活率低于 {SURVIVAL_WARN_RATE}% 会给出告警提示。
+            成活率 = 成活株数 / 该地块栽植总株数，保存时自动计算；低于 {SURVIVAL_WARN_RATE}% 会告警。
+            测次由项目部定级后即定版锁定，班组补植只更新缺株数与班组实测成活率，不会改写已定级测次；地块潮位带
+            / 底质变更后原结论失效，须重新验收录入新测次。
           </Typography.Text>
         </Form>
       </Modal>

@@ -110,8 +110,11 @@ export default function App() {
                 <Tag>{currentPlot.tideZone}潮位带 / {currentPlot.substrate}</Tag>
                 <Tag color="blue">栽植 {currentStat.plantTotal.toLocaleString('zh-CN')} 株</Tag>
                 <Tag color={currentStat.surveyCount === 0 ? 'default' : 'green'}>
-                  {currentStat.surveyCount === 0 ? '尚未验收' : `成活率 ${percentText(currentStat.latestRate)}`}
+                  {currentStat.surveyCount === 0 ? '尚未验收' : `项目部成活率 ${percentText(currentStat.latestRate)}`}
                 </Tag>
+                {currentPlot.crewRateDate ? (
+                  <Tag color="cyan">班组测得 {percentText(currentPlot.crewSurvivalRate)}</Tag>
+                ) : null}
                 <Tag color={currentPlot.missingCount > 0 ? 'orange' : 'green'}>缺株 {currentPlot.missingCount} 株</Tag>
               </>
             ) : (
