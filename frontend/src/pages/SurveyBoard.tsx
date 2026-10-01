@@ -229,14 +229,33 @@ export default function SurveyBoard() {
       render: (_value, record) => {
         const summary = summaryOf(record.plotId);
         const point = summary.points.find((item) => item.surveyId === record.id);
+        const stale = point?.stale ?? false;
         return (
-          <RateTag
-            rate={point?.rate ?? record.survivalRate}
-            level={point?.level ?? record.grade}
-            manual={record.gradeManual}
-          />
+          <Space direction="vertical" size={0}>
+            <RateTag
+              rate={point?.rate ?? record.survivalRate}
+              level={point?.level ?? record.grade}
+              manual={record.gradeManual}
+            />
+            {stale ? (
+              <Tag color="default" style={{ fontSize: 12, marginTop: 2 }}>
+                立地变更 · 结论失效
+              </Tag>
+            ) : null}
+          </Space>
         );
       },
+    },
+    {
+      title: '验收立地',
+      key: 'site',
+      width: 150,
+      render: (_value, record) => (
+        <Space size={4} wrap>
+          <Tag color="cyan">{record.tideZone}潮位</Tag>
+          <Tag>{record.substrate}</Tag>
+        </Space>
+      ),
     },
     {
       title: '平均株高',
@@ -305,6 +324,8 @@ export default function SurveyBoard() {
     return stat.surveyCount > 0 && stat.latestRate < SURVIVAL_WARN_RATE;
   });
 
+  const stalePlots = plots.filter((plot) => statOf(plot.id).hasStale);
+
   return (
     <div>
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
@@ -339,6 +360,24 @@ export default function SurveyBoard() {
                 <span key={plot.id}>
                   {plot.name}：最新成活率 {percentText(statOf(plot.id).latestRate)}，建议补植{' '}
                   {statOf(plot.id).suggestReplant} 株
+                </span>
+              ))}
+            </Space>
+          }
+        />
+      ) : null}
+
+      {stalePlots.length > 0 ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message={`有 ${stalePlots.length} 个地块的立地条件已变更，旧验收结论失效`}
+          description={
+            <Space direction="vertical" size={2}>
+              {stalePlots.map((plot) => (
+                <span key={plot.id}>
+                  {plot.name}：潮位带 / 底质已变更，{statOf(plot.id).staleCount} 个测次结论失效，请重新验收
                 </span>
               ))}
             </Space>
@@ -436,7 +475,7 @@ export default function SurveyBoard() {
             loading={loading || !ready}
             columns={columns}
             dataSource={filtered}
-            scroll={{ x: 1280 }}
+            scroll={{ x: 1430 }}
             rowSelection={{
               selectedRowKeys: selectedIds,
               onChange: (keys) => setSelectedIds(keys.map((key) => String(key))),

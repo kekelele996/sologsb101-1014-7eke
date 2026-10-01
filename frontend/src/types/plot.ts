@@ -34,10 +34,16 @@ export interface Plot {
   restoreMode: RestoreMode;
   /** 跟踪状态 */
   state: PlotState;
-  /** 缺株数（株）——补植完成后由此回写 */
+  /** 缺株数（株）——班组补植完成后由此回写 */
   missingCount: number;
   /** 最近一次补植/复壮回写日期 */
   lastReplantDate: string;
+  /**
+   * 班组最新测得成活率（%）——养护班组现场补植完成时实测并回写，
+   * 与项目部按测次定级的官方成活率相互独立：班组回写只动这个字段，不改验收记录。
+   * 从未实测时为 null。
+   */
+  latestMeasuredRate: number | null;
   createdAt: string;
   updatedAt: string;
   /** 数据行结构修订号，便于后续按行迁移 */

@@ -44,7 +44,7 @@ import {
   type PlotDraft,
 } from '../types/plot';
 import { ROUTES } from '../router';
-import { percentText } from '../utils/rate';
+import { percentText, rateLevel } from '../utils/rate';
 
 const DEFAULT_DRAFT: PlotDraft = {
   name: '',
@@ -213,10 +213,17 @@ export default function PlotList() {
       width: 190,
       render: (_value, record) => {
         const stat = statOf(record.id);
+        if (stat.surveyCount === 0) {
+          return <RateTag rate={null} level={stat.level} />;
+        }
+        // 立地条件变更后旧测次结论失效，且无新测次 → 需重新验收
+        if (stat.latestRate === 0) {
+          return <Tag color="warning">立地变更 · 需重新验收</Tag>;
+        }
         return (
           <Space size={6} wrap>
-            <RateTag rate={stat.surveyCount > 0 ? stat.latestRate : null} level={stat.level} />
-            {stat.surveyCount > 0 && stat.trend !== 0 ? (
+            <RateTag rate={stat.latestRate} level={stat.level} />
+            {stat.trend !== 0 ? (
               <Typography.Text type={stat.trend > 0 ? 'success' : 'danger'} style={{ fontSize: 12 }}>
                 {stat.trend > 0 ? <RiseOutlined /> : <FallOutlined />} {Math.abs(stat.trend)}
               </Typography.Text>
@@ -224,6 +231,17 @@ export default function PlotList() {
           </Space>
         );
       },
+    },
+    {
+      title: '班组测得成活率',
+      key: 'latestMeasuredRate',
+      width: 150,
+      render: (_value, record) =>
+        record.latestMeasuredRate === null ? (
+          <Typography.Text type="secondary">未测量</Typography.Text>
+        ) : (
+          <RateTag rate={record.latestMeasuredRate} level={rateLevel(record.latestMeasuredRate)} />
+        ),
     },
     {
       title: '缺株数',

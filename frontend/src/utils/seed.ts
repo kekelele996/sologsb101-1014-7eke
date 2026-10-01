@@ -4,7 +4,7 @@
  * 所有 id 固定，保证 /plots/:id/seedlings、/plots/:id/plantings 深链一定命中真实数据。
  */
 import { db, ROW_REVISION } from './db';
-import type { Plot } from '../types/plot';
+import type { Plot, Substrate, TideZone } from '../types/plot';
 import type { Seedling } from '../types/seedling';
 import type { Planting } from '../types/planting';
 import type { Survey } from '../types/survey';
@@ -20,6 +20,13 @@ export const SEED_IDS = {
   plotC: 'plot-beiyu-b',
 } as const;
 
+/** 各地块立地条件（潮位带 / 底质），用于验收记录留底 */
+const siteByPlot: Record<string, { tideZone: TideZone; substrate: Substrate }> = {
+  [SEED_IDS.plotA]: { tideZone: '中', substrate: '淤泥质' },
+  [SEED_IDS.plotB]: { tideZone: '低', substrate: '砂泥质' },
+  [SEED_IDS.plotC]: { tideZone: '高', substrate: '砂质' },
+};
+
 function plotRow(row: Omit<Plot, 'createdAt' | 'updatedAt' | 'revision'>): Plot {
   return { ...row, createdAt: SEED_TIME, updatedAt: SEED_TIME, revision: ROW_REVISION };
 }
@@ -32,13 +39,19 @@ function plantingRow(row: Omit<Planting, 'createdAt' | 'updatedAt' | 'revision'>
   return { ...row, createdAt: SEED_TIME, updatedAt: SEED_TIME, revision: ROW_REVISION };
 }
 
-function surveyRow(row: Omit<Survey, 'createdAt' | 'updatedAt' | 'revision' | 'grade' | 'gradeManual' | 'survivalRate'>, total: number): Survey {
+function surveyRow(
+  row: Omit<Survey, 'createdAt' | 'updatedAt' | 'revision' | 'grade' | 'gradeManual' | 'survivalRate' | 'tideZone' | 'substrate'>,
+  total: number,
+): Survey {
   const survivalRate = calcSurvivalRate(row.aliveCount, total);
+  const site = siteByPlot[row.plotId] ?? { tideZone: '中' as TideZone, substrate: '淤泥质' as Substrate };
   return {
     ...row,
     survivalRate,
     grade: rateLevel(survivalRate),
     gradeManual: false,
+    tideZone: site.tideZone,
+    substrate: site.substrate,
     createdAt: SEED_TIME,
     updatedAt: SEED_TIME,
     revision: ROW_REVISION,
@@ -69,6 +82,7 @@ export async function seedDatabase(): Promise<void> {
       state: '跟踪中',
       missingCount: 1092,
       lastReplantDate: '',
+      latestMeasuredRate: 79.0,
     }),
     plotRow({
       id: SEED_IDS.plotB,
@@ -80,6 +94,7 @@ export async function seedDatabase(): Promise<void> {
       state: '跟踪中',
       missingCount: 0,
       lastReplantDate: '2025-04-20',
+      latestMeasuredRate: 64.0,
     }),
     plotRow({
       id: SEED_IDS.plotC,
@@ -91,6 +106,7 @@ export async function seedDatabase(): Promise<void> {
       state: '已验收',
       missingCount: 560,
       lastReplantDate: '2024-11-08',
+      latestMeasuredRate: 93.0,
     }),
   ];
 
@@ -134,9 +150,48 @@ export async function seedDatabase(): Promise<void> {
 
   // ---------------- 补植计划（每地块 1 条，覆盖三种状态） ----------------
   const replants: Replant[] = [
-    replantRow({ id: 'replant-a1', plotId: SEED_IDS.plotA, missingCount: 1092, planDate: '2025-04-10', species: '秋茄', state: '待补植' }),
-    replantRow({ id: 'replant-b1', plotId: SEED_IDS.plotB, missingCount: 1188, planDate: '2025-04-18', species: '白骨壤', state: '已补植' }),
-    replantRow({ id: 'replant-c1', plotId: SEED_IDS.plotC, missingCount: 560, planDate: '2024-11-05', species: '无瓣海桑', state: '已复核' }),
+    replantRow({
+      id: 'replant-a1',
+      plotId: SEED_IDS.plotA,
+      missingCount: 1092,
+      actualCount: 1092,
+      planDate: '2025-04-10',
+      species: '秋茄',
+      state: '待补植',
+      reconcileState: '未对账',
+      reconcileNote: '',
+      reconciledAt: '',
+      reconciledSurveyId: '',
+      beforeAliveCount: 0,
+    }),
+    replantRow({
+      id: 'replant-b1',
+      plotId: SEED_IDS.plotB,
+      missingCount: 1188,
+      actualCount: 1188,
+      planDate: '2025-04-18',
+      species: '白骨壤',
+      state: '已补植',
+      reconcileState: '已对账',
+      reconcileNote: '',
+      reconciledAt: '2025-04-20',
+      reconciledSurveyId: '',
+      beforeAliveCount: 2772,
+    }),
+    replantRow({
+      id: 'replant-c1',
+      plotId: SEED_IDS.plotC,
+      missingCount: 560,
+      actualCount: 560,
+      planDate: '2024-11-05',
+      species: '无瓣海桑',
+      state: '已复核',
+      reconcileState: '已对账',
+      reconcileNote: '',
+      reconciledAt: '2024-11-08',
+      reconciledSurveyId: '',
+      beforeAliveCount: 7440,
+    }),
   ];
 
   await db.transaction('rw', db.plots, db.seedlings, db.plantings, db.surveys, db.replants, async () => {

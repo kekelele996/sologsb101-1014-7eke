@@ -5,7 +5,7 @@
  */
 import { create } from 'zustand';
 import type { RateLevel, Survey } from '../types/survey';
-import { db, initDatabase, patchSurveyGrades, putSurvey, removeSurvey } from '../utils/db';
+import { db, initDatabase, patchSurveyGrades, putSurvey, reconcileReplants, removeSurvey, ROW_REVISION } from '../utils/db';
 import type { SurvivalSummary } from '../hooks/useSurvivalRate';
 import { nowIso, uuid } from '../utils/id';
 import { calcSurvivalRate, rateLevel } from '../utils/rate';
@@ -86,6 +86,7 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
   async createSurvey(draft) {
     const total = totalPlantedOf(draft.plotId);
     const survivalRate = calcSurvivalRate(draft.aliveCount, total);
+    const plot = usePlotStore.getState().plots.find((row) => row.id === draft.plotId);
     const stamp = nowIso();
     const row: Survey = {
       id: uuid('survey'),
@@ -97,11 +98,16 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
       survivalRate,
       grade: rateLevel(survivalRate),
       gradeManual: false,
+      // 验收留底：记录验收时的潮位带 / 底质，作为该测次结论的立地凭证
+      tideZone: plot?.tideZone ?? '中',
+      substrate: plot?.substrate ?? '淤泥质',
       createdAt: stamp,
       updatedAt: stamp,
-      revision: 2,
+      revision: ROW_REVISION,
     };
     await putSurvey(row);
+    // 项目部重新验收后，与班组补植株数对账（对不上的补植计划自动挂起）
+    await reconcileReplants(draft.plotId, row.id);
     set({ revision: get().revision + 1 });
     return row;
   },
@@ -149,12 +155,18 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
       id: uuid('replant'),
       plotId,
       missingCount: missing,
+      actualCount: missing,
       planDate: new Date(Date.now() + 15 * 24 * 3600 * 1000).toISOString().slice(0, 10),
       species,
       state: '待补植',
+      reconcileState: '未对账',
+      reconcileNote: '',
+      reconciledAt: '',
+      reconciledSurveyId: '',
+      beforeAliveCount: 0,
       createdAt: stamp,
       updatedAt: stamp,
-      revision: 2,
+      revision: ROW_REVISION,
     });
     set({ revision: get().revision + 1, lastMessage: `已为「${plot.name}」生成补植计划：缺株 ${missing} 株` });
     return `已生成补植计划：缺株 ${missing} 株`;

@@ -47,6 +47,10 @@ export interface PlotStat {
   trend: number;
   /** 建议补植株数 */
   suggestReplant: number;
+  /** 是否存在因立地条件变更而失效的测次 */
+  hasStale: boolean;
+  /** 失效测次数 */
+  staleCount: number;
 }
 
 const EMPTY_FILTERS: PlotFilters = { keyword: '', tideZone: 'all', substrate: 'all' };
@@ -105,6 +109,8 @@ const EMPTY_STAT: Omit<PlotStat, 'plotId'> = {
   level: 'poor',
   trend: 0,
   suggestReplant: 0,
+  hasStale: false,
+  staleCount: 0,
 };
 
 let subscribed = false;
@@ -143,7 +149,10 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
             const summaries: Record<string, SurvivalSummary> = {};
             plots.forEach((plot) => {
               const plotSeedlings = seedlings.filter((row) => row.plotId === plot.id);
-              const summary = buildSurvivalSummary(plot.id, surveys, plantings);
+              const summary = buildSurvivalSummary(plot.id, surveys, plantings, {
+                tideZone: plot.tideZone,
+                substrate: plot.substrate,
+              });
               summaries[plot.id] = summary;
               stats[plot.id] = {
                 plotId: plot.id,
@@ -155,6 +164,8 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
                 level: summary.level,
                 trend: summary.trend,
                 suggestReplant: summary.suggestReplant,
+                hasStale: summary.hasStale,
+                staleCount: summary.staleCount,
               };
             });
             const sorted = [...plots].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
@@ -205,6 +216,7 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
       state: draft.state,
       missingCount: 0,
       lastReplantDate: '',
+      latestMeasuredRate: null,
       createdAt: stamp,
       updatedAt: stamp,
       revision: ROW_REVISION,

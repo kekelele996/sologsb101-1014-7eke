@@ -109,8 +109,12 @@ export default function App() {
                 <Tag>{currentPlot.areaMu} 亩</Tag>
                 <Tag>{currentPlot.tideZone}潮位带 / {currentPlot.substrate}</Tag>
                 <Tag color="blue">栽植 {currentStat.plantTotal.toLocaleString('zh-CN')} 株</Tag>
-                <Tag color={currentStat.surveyCount === 0 ? 'default' : 'green'}>
-                  {currentStat.surveyCount === 0 ? '尚未验收' : `成活率 ${percentText(currentStat.latestRate)}`}
+                <Tag color={currentStat.surveyCount === 0 ? 'default' : currentStat.latestRate === 0 ? 'warning' : 'green'}>
+                  {currentStat.surveyCount === 0
+                    ? '尚未验收'
+                    : currentStat.latestRate === 0
+                      ? '立地变更 · 需重新验收'
+                      : `成活率 ${percentText(currentStat.latestRate)}`}
                 </Tag>
                 <Tag color={currentPlot.missingCount > 0 ? 'orange' : 'green'}>缺株 {currentPlot.missingCount} 株</Tag>
               </>

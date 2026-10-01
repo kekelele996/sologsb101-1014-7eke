@@ -1,7 +1,7 @@
 /**
  * IndexedDB 持久化层（Dexie 封装）
  * - 数据库名：gbmangrove
- * - 含数据结构版本号与 v1 → v2 升级迁移逻辑（升级时按 version().stores() 补齐索引）
+ * - 含数据结构版本号与 v1 → v2 → v3 升级迁移逻辑（升级时按 version().stores() 补齐索引）
  * - 提供各表增删改查、整库快照导入导出与重置
  * 纯前端应用：不依赖任何后端服务或外部接口。
  */
@@ -10,7 +10,7 @@ import type { Plot } from '../types/plot';
 import type { Seedling } from '../types/seedling';
 import type { Planting } from '../types/planting';
 import type { Survey } from '../types/survey';
-import type { Replant, ReplantState } from '../types/replant';
+import type { Replant, ReplantCompletionDraft, ReplantState } from '../types/replant';
 import { rateLevel } from './rate';
 import { nowIso, today } from './id';
 import { seedDatabase } from './seed';
@@ -19,10 +19,10 @@ import { seedDatabase } from './seed';
 export const DB_NAME = 'gbmangrove';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** 数据行结构修订号 */
-export const ROW_REVISION = 2;
+export const ROW_REVISION = 3;
 
 class MangroveDatabase extends Dexie {
   plots!: Table<Plot, string>;
@@ -44,7 +44,7 @@ class MangroveDatabase extends Dexie {
     });
 
     // ---------- v2：补齐索引与回写字段，并迁移历史数据 ----------
-    this.version(DB_SCHEMA_VERSION)
+    this.version(2)
       .stores({
         plots: 'id, name, tideZone, substrate, restoreMode, state, createdAt, updatedAt',
         seedlings: 'id, plotId, species, source, arrivalDate, quantity',
@@ -80,6 +80,79 @@ class MangroveDatabase extends Dexie {
           if (typeof row.grade !== 'string') row.grade = rateLevel(rate);
           if (typeof row.gradeManual !== 'boolean') row.gradeManual = false;
         });
+      });
+
+    // ---------- v3：班组补植与项目验收两边分离，补齐对账与立地留底字段 ----------
+    this.version(DB_SCHEMA_VERSION)
+      .stores({
+        plots: 'id, name, tideZone, substrate, restoreMode, state, createdAt, updatedAt',
+        seedlings: 'id, plotId, species, source, arrivalDate, quantity',
+        plantings: 'id, plotId, seedlingId, plantDate, spacingM',
+        surveys: 'id, plotId, [plotId+round], date, grade',
+        replants: 'id, plotId, planDate, state, reconcileState, species',
+      })
+      .upgrade(async (tx) => {
+        const [plots, surveys, replants] = await Promise.all([
+          tx.table('plots').toArray(),
+          tx.table('surveys').toArray(),
+          tx.table('replants').toArray(),
+        ]);
+        const plotMap = new Map<string, Plot>(plots.map((p) => [p.id, p]));
+
+        // 迁移 4a：地块补齐缺株数、最近补植日期、班组最新测得成活率
+        // （已有数据升级时补齐缺株数和最近补植日期；班组测得成活率取最近一次验收成活率兜底）
+        const latestRateByPlot = new Map<string, number | null>();
+        for (const plot of plots) {
+          const plotSurveys = surveys
+            .filter((s) => s.plotId === plot.id)
+            .sort((a, b) => b.round - a.round);
+          latestRateByPlot.set(plot.id, plotSurveys.length > 0 ? plotSurveys[0].survivalRate : null);
+        }
+        await tx.table('plots').bulkPut(
+          plots.map((plot) => ({
+            ...plot,
+            missingCount: typeof plot.missingCount === 'number' ? plot.missingCount : 0,
+            lastReplantDate: typeof plot.lastReplantDate === 'string' ? plot.lastReplantDate : '',
+            latestMeasuredRate:
+              typeof plot.latestMeasuredRate === 'number'
+                ? plot.latestMeasuredRate
+                : latestRateByPlot.get(plot.id) ?? null,
+            revision: ROW_REVISION,
+          })),
+        );
+
+        // 迁移 4b：验收记录补齐验收时的潮位带 / 底质留底（取地块当前立地条件）
+        await tx.table('surveys').bulkPut(
+          surveys.map((survey) => {
+            const plot = plotMap.get(survey.plotId);
+            return {
+              ...survey,
+              tideZone: typeof survey.tideZone === 'string' ? survey.tideZone : (plot?.tideZone ?? '中'),
+              substrate: typeof survey.substrate === 'string' ? survey.substrate : (plot?.substrate ?? '淤泥质'),
+              revision: ROW_REVISION,
+            };
+          }),
+        );
+
+        // 迁移 4c：补植计划补齐实际补植株数与对账字段
+        // 历史已补植 / 已复核的计划视为已对账，待补植的视为未对账
+        await tx.table('replants').bulkPut(
+          replants.map((replant) => ({
+            ...replant,
+            actualCount: typeof replant.actualCount === 'number' ? replant.actualCount : replant.missingCount,
+            reconcileState:
+              typeof replant.reconcileState === 'string'
+                ? replant.reconcileState
+                : replant.state === '待补植'
+                  ? '未对账'
+                  : '已对账',
+            reconcileNote: typeof replant.reconcileNote === 'string' ? replant.reconcileNote : '',
+            reconciledAt: typeof replant.reconciledAt === 'string' ? replant.reconciledAt : '',
+            reconciledSurveyId: typeof replant.reconciledSurveyId === 'string' ? replant.reconciledSurveyId : '',
+            beforeAliveCount: typeof replant.beforeAliveCount === 'number' ? replant.beforeAliveCount : 0,
+            revision: ROW_REVISION,
+          })),
+        );
       });
   }
 }
@@ -234,46 +307,122 @@ export async function removeReplant(id: string): Promise<void> {
 }
 
 /**
- * 补植完成回写：
- * 1）扣减地块缺株数；2）写入最近补植日期；3）按补植后的总株数重算最新一次验收的成活率。
+ * 班组补植完成回写（两边分离）：
+ * 1）扣减地块缺株数（按实际补植株数）；2）写入最近补植日期；3）回写班组最新测得成活率。
+ * 只动地块侧字段，绝不带着改项目部已定级的测次与等级——验收记录只有项目部重新验收才算数。
+ * 同时记录实际补植株数与对账基准成活株数，状态置为「未对账」，等项目部新测次验收核销。
  */
-export async function applyReplantCompletion(replantId: string): Promise<void> {
-  await db.transaction('rw', db.plots, db.replants, db.surveys, db.plantings, async () => {
+export async function applyReplantCompletion(
+  replantId: string,
+  completion: ReplantCompletionDraft,
+): Promise<void> {
+  await db.transaction('rw', db.plots, db.replants, db.surveys, async () => {
     const replant = await db.replants.get(replantId);
     if (!replant) return;
     const plot = await db.plots.get(replant.plotId);
     if (!plot) return;
 
-    const nextMissing = Math.max(0, plot.missingCount - replant.missingCount);
+    const actualCount = Math.max(0, Math.round(completion.actualCount || 0));
+    // 对账基准：补植完成时项目部最新一次验收的成活株数
+    const surveys = await db.surveys.where('plotId').equals(plot.id).toArray();
+    const beforeAlive = surveys.reduce((acc, item) => (item.round > acc.round ? item : acc), { round: 0, aliveCount: 0 })
+      .aliveCount;
+
     await db.plots.update(plot.id, {
-      missingCount: nextMissing,
+      missingCount: Math.max(0, plot.missingCount - actualCount),
       lastReplantDate: today(),
+      latestMeasuredRate: completion.measuredRate,
       updatedAt: nowIso(),
     });
 
-    const plantings = await db.plantings.where('plotId').equals(plot.id).toArray();
-    const total = plantings.reduce((acc, item) => acc + item.count, 0);
-    const surveys = await db.surveys.where('plotId').equals(plot.id).toArray();
-    if (surveys.length === 0) return;
-    const latest = surveys.reduce((acc, item) => (item.round > acc.round ? item : acc));
-    // 补植后按「原成活株数 + 本次补植株数」重新计算成活率
-    const aliveAfter = latest.aliveCount + replant.missingCount;
-    const rate = total > 0 ? Math.round(Math.min(100, (aliveAfter / total) * 100) * 10) / 10 : latest.survivalRate;
-    await db.surveys.update(latest.id, {
-      aliveCount: aliveAfter,
-      survivalRate: rate,
-      grade: latest.gradeManual ? latest.grade : rateLevel(rate),
+    await db.replants.update(replant.id, {
+      state: '已补植',
+      actualCount,
+      reconcileState: '未对账',
+      reconcileNote: '',
+      reconciledAt: '',
+      reconciledSurveyId: '',
+      beforeAliveCount: beforeAlive,
       updatedAt: nowIso(),
     });
   });
 }
 
-/** 推进补植状态（待补植 → 已补植 → 已复核），推进到「已补植」时触发回写 */
-export async function advanceReplantState(replantId: string, next: ReplantState): Promise<void> {
-  await db.replants.update(replantId, { state: next, updatedAt: nowIso() });
+/**
+ * 班组补植株数与项目部验收对账：
+ * 项目部每录入一个新测次（重新验收）后触发，把该地块所有「已补植 + 未对账」的计划一起核销。
+ * 规则：新测次成活株数 − 上一测次成活株数 ≥ 各计划实际补植株数之和 → 对得上（已对账）；
+ * 否则对不上，先置为「挂起」等人核定，不自动改任何验收结论。
+ */
+export async function reconcileReplants(plotId: string, newSurveyId: string): Promise<void> {
+  await db.transaction('rw', db.replants, db.surveys, async () => {
+    const newSurvey = await db.surveys.get(newSurveyId);
+    if (!newSurvey || newSurvey.plotId !== plotId) return;
+
+    const pendings = await db.replants
+      .where('plotId')
+      .equals(plotId)
+      .filter((row) => row.state === '已补植' && row.reconcileState === '未对账')
+      .toArray();
+    if (pendings.length === 0) return;
+
+    // 对账基准：新测次之前最近一次验收的成活株数
+    const prevSurveys = await db.surveys
+      .where('plotId')
+      .equals(plotId)
+      .filter((row) => row.round < newSurvey.round)
+      .toArray();
+    const beforeAlive = prevSurveys.length > 0 ? prevSurveys.sort((a, b) => b.round - a.round)[0].aliveCount : 0;
+    const expectedIncrease = pendings.reduce((acc, row) => acc + row.actualCount, 0);
+    const actualIncrease = newSurvey.aliveCount - beforeAlive;
+    const stamp = nowIso();
+
+    if (actualIncrease >= expectedIncrease) {
+      for (const row of pendings) {
+        await db.replants.update(row.id, {
+          reconcileState: '已对账',
+          reconcileNote: '',
+          reconciledAt: today(),
+          reconciledSurveyId: newSurveyId,
+          updatedAt: stamp,
+        });
+      }
+      return;
+    }
+
+    // 对不上 → 挂起，等人定
+    const note = `验收成活增加 ${actualIncrease} 株，与班组补植 ${expectedIncrease} 株不符（${beforeAlive} → ${newSurvey.aliveCount}），待人工核定`;
+    for (const row of pendings) {
+      await db.replants.update(row.id, {
+        reconcileState: '挂起',
+        reconcileNote: note,
+        updatedAt: stamp,
+      });
+    }
+  });
+}
+
+/** 人工核定：挂起的补植计划经人调查后确认对账一致，置为「已对账」（等人定） */
+export async function resolveReconcile(replantId: string, note: string): Promise<void> {
+  await db.replants.update(replantId, {
+    reconcileState: '已对账',
+    reconcileNote: note.trim() || '人工核定：验收成活与班组补植一致',
+    reconciledAt: today(),
+    updatedAt: nowIso(),
+  });
+}
+
+/** 推进补植状态（待补植 → 已补植 → 已复核）；推进到「已补植」时触发回写（两边分离，不动验收记录） */
+export async function advanceReplantState(
+  replantId: string,
+  next: ReplantState,
+  completion?: ReplantCompletionDraft,
+): Promise<void> {
   if (next === '已补植') {
-    await applyReplantCompletion(replantId);
+    await applyReplantCompletion(replantId, completion ?? { actualCount: 0, measuredRate: null });
+    return;
   }
+  await db.replants.update(replantId, { state: next, updatedAt: nowIso() });
 }
 
 /* ---------------------------- 整库快照 ---------------------------- */
@@ -310,7 +459,7 @@ export async function exportSnapshot(): Promise<DatabaseSnapshot> {
   };
 }
 
-/** 用快照覆盖整库（导入存档） */
+/** 用快照覆盖整库（导入存档）；对旧版本存档补齐新字段，避免缺列 */
 export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> {
   await db.transaction('rw', db.plots, db.seedlings, db.plantings, db.surveys, db.replants, async () => {
     await Promise.all([
@@ -320,11 +469,43 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
       db.surveys.clear(),
       db.replants.clear(),
     ]);
-    await db.plots.bulkPut(snapshot.plots.map((row) => ({ ...row, revision: ROW_REVISION })));
+    // 旧版本存档（v2）可能缺少新字段，导入时补齐默认值
+    const plots = snapshot.plots.map((row) => ({
+      ...row,
+      missingCount: typeof row.missingCount === 'number' ? row.missingCount : 0,
+      lastReplantDate: typeof row.lastReplantDate === 'string' ? row.lastReplantDate : '',
+      latestMeasuredRate: typeof row.latestMeasuredRate === 'number' ? row.latestMeasuredRate : null,
+      revision: ROW_REVISION,
+    }));
+    const surveys = snapshot.surveys.map((row) => {
+      const plot = plots.find((p) => p.id === row.plotId);
+      return {
+        ...row,
+        tideZone: typeof row.tideZone === 'string' ? row.tideZone : (plot?.tideZone ?? '中'),
+        substrate: typeof row.substrate === 'string' ? row.substrate : (plot?.substrate ?? '淤泥质'),
+        revision: ROW_REVISION,
+      };
+    });
+    const replants = snapshot.replants.map((row) => ({
+      ...row,
+      actualCount: typeof row.actualCount === 'number' ? row.actualCount : row.missingCount,
+      reconcileState:
+        typeof row.reconcileState === 'string'
+          ? row.reconcileState
+          : row.state === '待补植'
+            ? '未对账'
+            : '已对账',
+      reconcileNote: typeof row.reconcileNote === 'string' ? row.reconcileNote : '',
+      reconciledAt: typeof row.reconciledAt === 'string' ? row.reconciledAt : '',
+      reconciledSurveyId: typeof row.reconciledSurveyId === 'string' ? row.reconciledSurveyId : '',
+      beforeAliveCount: typeof row.beforeAliveCount === 'number' ? row.beforeAliveCount : 0,
+      revision: ROW_REVISION,
+    }));
+    await db.plots.bulkPut(plots);
     await db.seedlings.bulkPut(snapshot.seedlings.map((row) => ({ ...row, revision: ROW_REVISION })));
     await db.plantings.bulkPut(snapshot.plantings.map((row) => ({ ...row, revision: ROW_REVISION })));
-    await db.surveys.bulkPut(snapshot.surveys.map((row) => ({ ...row, revision: ROW_REVISION })));
-    await db.replants.bulkPut(snapshot.replants.map((row) => ({ ...row, revision: ROW_REVISION })));
+    await db.surveys.bulkPut(surveys);
+    await db.replants.bulkPut(replants);
   });
 }
 

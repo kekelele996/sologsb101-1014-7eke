@@ -15,6 +15,8 @@ export const RATE_LEVEL_LABEL: Record<RateLevel, string> = {
 
 export const RATE_LEVEL_OPTIONS: RateLevel[] = ['excellent', 'good', 'fair', 'poor'];
 
+import type { Substrate, TideZone } from './plot';
+
 export interface Survey {
   id: string;
   /** 所属地块 */
@@ -33,6 +35,10 @@ export interface Survey {
   grade: RateLevel;
   /** 该等级是否被人工调整过 */
   gradeManual: boolean;
+  /** 验收时的潮位带（留底）——地块立地条件变更后，旧测次结论据此判定失效 */
+  tideZone: TideZone;
+  /** 验收时的底质（留底） */
+  substrate: Substrate;
   createdAt: string;
   updatedAt: string;
   revision: number;

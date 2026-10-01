@@ -42,7 +42,7 @@ docker compose up -d --build       # 改完代码后重新构建
 | 构建 | Vite 5 | 开发端口与宿主端口一致（22814） |
 | 路由 | React Router 6 | `createBrowserRouter` + 路由懒加载 |
 | 状态管理 | Zustand 4 | 跨页状态集中在 store，页面只读 store |
-| 本地持久化 | Dexie 4（IndexedDB） | 库名 `gbmangrove`，含 v1 → v2 升级迁移 |
+| 本地持久化 | Dexie 4（IndexedDB） | 库名 `gbmangrove`，含 v1 → v2 → v3 升级迁移 |
 | 时间处理 | dayjs | |
 | 容器 | node:20-alpine → nginx:alpine | 多阶段构建，`chmod -R a+rX` 规避静态资源 403 |
 
@@ -100,11 +100,13 @@ sologsb101-1014/
 
 * **持久化方案**：IndexedDB，通过 Dexie 封装（`src/utils/db.ts`）。
 * **数据库名**：`gbmangrove`。
-* **数据结构版本**：`DB_SCHEMA_VERSION = 2`，`version(1)` 建立全部表，`version(2)` 补齐索引并执行 `.upgrade()` 迁移：
+* **数据结构版本**：`DB_SCHEMA_VERSION = 3`，`version(1)` 建立全部表，`version(2)` 补齐索引并执行 `.upgrade()` 迁移，`version(3)` 执行 `.upgrade()` 迁移：
   * 为 `plots` 增加 `updatedAt`、`surveys` 增加 `[plotId+round]` 复合索引、`plantings` 增加 `spacingM` 索引等；
   * 回填 `revision` / `createdAt` / `updatedAt`；
-  * 为 `plots` 补齐 `missingCount`、`lastReplantDate` 回写字段；
-  * 为 `surveys` 补齐 `grade`、`gradeManual` 字段（按 `survivalRate` 自动判定等级）。
+  * 为 `plots` 补齐 `missingCount`、`lastReplantDate`、`latestMeasuredRate`（班组最新测得成活率）回写字段；
+  * 为 `surveys` 补齐 `grade`、`gradeManual` 字段（按 `survivalRate` 自动判定等级）；
+  * 为 `surveys` 补齐验收时的 `tideZone` / `substrate` 留底（地块立地条件变更后旧测次结论据此判定失效）；
+  * 为 `replants` 补齐 `actualCount`（实际补植株数）、`reconcileState`（未对账/已对账/挂起）、`reconcileNote`、`reconciledAt`、`reconciledSurveyId`、`beforeAliveCount` 字段。
 * **表结构**：
 
   | 表 | 主键 | 主要索引 |
@@ -150,5 +152,7 @@ npm run preview      # 预览 dist 产物
 * **成活率** = 成活株数 ÷ 该地块栽植总株数 × 100%（`src/utils/rate.ts` 统一口径）。
 * **成活率等级**：≥ 85% 优，70%–85% 良，50%–70% 一般，< 50% 差；低于 50% 视为告警，建议生成补植计划。
 * **密度合理性**：平均单株占地面积需落在 0.6–12 ㎡/株；过密/过疏都会在栽植记录页给出提示。
-* **补植回写**：补植状态推进到「已补植」时，自动扣减地块缺株数、写入最近补植日期，
-  并按「原成活株数 + 本次补植株数」重算最新一次验收的成活率。
+* **班组补植与项目验收两边分离**：养护班组现场补植完成时，只回写地块 `missingCount`（缺株数）、`lastReplantDate`（最近补植日期）与 `latestMeasuredRate`（班组最新测得成活率），**绝不带着改项目部已定级的测次与等级**；验收记录只有项目部重新验收（录入新测次）才算数。
+* **补植株数对账**：班组补植完成时回填 `actualCount`（实际补植株数），状态置为「未对账」；项目部每录入一个新测次即触发对账——新测次成活增量 ≥ 各计划实际补植株数之和则「已对账」，对不上则先「挂起」等人核定（页面提供「人工核定」入口），不自动改任何验收结论。
+* **立地条件变更失效**：验收记录留底当时的 `tideZone` / `substrate`；地块潮位带或底质一改，引用它的旧测次结论即判定为「失效」，成活率结论改取最新有效测次，并提示「需重新验收」。
+* **升级补齐**：数据结构升级时为已有地块补齐缺株数与最近补植日期（及班组测得成活率），为补植计划补齐实际补植株数与对账字段。
